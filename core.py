@@ -1,4 +1,4 @@
-"""Core logic for vidconv: validation, scanning, probing and ffmpeg conversion.
+"""Core logic for treeconv: validation, scanning, probing and ffmpeg conversion.
 
 No UI code lives here, so it can be driven by the TUI or by the headless CLI.
 """
@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,6 +123,7 @@ class Settings:
     copy_if_same_codec: bool = True  # copy files already in the target codec
     skip_existing: bool = True       # resume: skip outputs that already exist
     eight_bit: bool = True           # force yuv420p (best device compatibility)
+    priority: str = "low"            # "normal", "low" or "idle" (see PRIORITIES)
 
 
 def tool_problems(codec_key: str) -> List[str]:
@@ -222,7 +224,7 @@ class Plan:
 
 
 def is_temp_name(name: str) -> bool:
-    return ".vidconv-tmp" in name
+    return ".treeconv-tmp" in name
 
 
 def scan(inputs: Sequence[Path], output: Path) -> Plan:
@@ -353,6 +355,35 @@ def plan_streams(info: dict, src_ext: str, container: str, target: str, remux: b
     if ext != wanted:
         notes.append(f"container switched {wanted} -> {ext}")
     return StreamPlan(ext, maps, unsupported, notes)
+
+
+# Encoders use every core by default. Lowering ffmpeg's priority lets the OS hand
+# those cores to other programs first, so encoding only takes CPU/disk time that
+# would otherwise sit unused and the desktop stays responsive.
+PRIORITIES = {
+    "normal": "Normal priority",
+    "low": "Low priority",
+    "idle": "Idle only",
+}
+
+
+def priority_wrap(cmd: List[str], priority: str) -> Tuple[List[str], dict]:
+    """Return (cmd, extra Popen kwargs) so the process runs at `priority`."""
+    if priority not in ("low", "idle"):
+        return cmd, {}
+    if sys.platform == "win32":
+        flag = (subprocess.IDLE_PRIORITY_CLASS if priority == "idle"
+                else subprocess.BELOW_NORMAL_PRIORITY_CLASS)
+        return cmd, {"creationflags": flag}
+    prefix: List[str] = []
+    if sys.platform.startswith("linux"):
+        if priority == "idle" and shutil.which("chrt"):
+            prefix += ["chrt", "--idle", "0"]       # SCHED_IDLE: runs only on idle CPUs
+        if shutil.which("ionice"):
+            prefix += ["ionice", "-c", "3"] if priority == "idle" else ["ionice", "-c", "2", "-n", "7"]
+    if shutil.which("nice"):
+        prefix += ["nice", "-n", "19" if priority == "idle" else "10"]
+    return prefix + cmd, {}
 
 
 def build_ffmpeg_cmd(src: Path, tmp: Path, sp: StreamPlan, s: Settings) -> List[str]:
@@ -496,7 +527,7 @@ class Converter:
 
         duration = float(info.get("format", {}).get("duration") or 0) or \
             max((float(v.get("duration") or 0) for v in vids), default=0.0)
-        tmp = dst.with_name(f".{dst.stem}.vidconv-tmp{sp.ext}")
+        tmp = dst.with_name(f".{dst.stem}.treeconv-tmp{sp.ext}")
         cmd = build_ffmpeg_cmd(job.src, tmp, sp, self.s)
         try:
             self._run_ffmpeg(cmd, duration, on_progress)
@@ -513,8 +544,9 @@ class Converter:
         return "copied_video" if remux else "converted"
 
     def _run_ffmpeg(self, cmd: List[str], duration: float, on_progress: Callable[..., None]) -> None:
+        cmd, extra = priority_wrap(cmd, self.s.priority)
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, bufsize=1)
+                                text=True, bufsize=1, **extra)
         self._proc = proc
         err_lines: List[str] = []
 

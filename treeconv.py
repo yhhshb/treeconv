@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""vidconv - batch video converter with a terminal UI.
+"""treeconv - batch video converter with a terminal UI.
 
 Mirrors one or more input folders into an output folder, re-encoding every
 video (default: to H.264/x264) while keeping all audio tracks, embedded
@@ -7,9 +7,9 @@ subtitles, chapters, metadata and attachments. Every other file (external
 .srt/.ass subtitles, .nfo, artwork, ...) is copied as-is.
 
 Usage:
-    python vidconv.py                                  # interactive TUI
-    python vidconv.py -i /media/Shows -i /media/Films -o /media/out   # TUI, pre-filled
-    python vidconv.py -i /media/Shows -o /media/out --run             # headless
+    python treeconv.py                                  # interactive TUI
+    python treeconv.py -i /media/Shows -i /media/Films -o /media/out   # TUI, pre-filled
+    python treeconv.py -i /media/Shows -o /media/out --run             # headless
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from core import (CODECS, CONTAINERS, Callbacks, Converter, Job, Plan, Settings,
+from core import (CODECS, CONTAINERS, PRIORITIES, Callbacks, Converter, Job, Plan, Settings,
                   human_size, scan, tool_problems, validate)
 
 
@@ -153,7 +153,7 @@ def build_app(settings: Settings):
             self.dismiss(None)
 
     class TuiCallbacks(Callbacks):
-        def __init__(self, app: "VidConvApp") -> None:
+        def __init__(self, app: "TreeConvApp") -> None:
             self.app = app
 
         def log(self, msg: str, level: str = "info") -> None:
@@ -171,8 +171,8 @@ def build_app(settings: Settings):
         def finished(self, summary: Dict[str, int], cancelled: bool) -> None:
             self.app.call_from_thread(self.app.on_finished, summary, cancelled)
 
-    class VidConvApp(App):
-        TITLE = "vidconv"
+    class TreeConvApp(App):
+        TITLE = "treeconv"
         SUB_TITLE = "batch video converter - keeps every subtitle"
         CSS = """
         #config { height: auto; max-height: 55%; padding: 0 1; }
@@ -182,7 +182,7 @@ def build_app(settings: Settings):
         #in_path, #out_path { width: 1fr; }
         #in_list { height: 5; border: round $panel; }
         #codec { width: 30; } #container { width: 36; } #preset { width: 16; }
-        #crf { width: 8; }
+        #crf { width: 8; } #priority { width: 22; }
         #actions { height: auto; margin-bottom: 1; }
         #actions Button { margin-right: 2; }
         #status { height: 1fr; padding: 0 1; border-top: solid $panel; }
@@ -248,6 +248,8 @@ def build_app(settings: Settings):
                     yield Checkbox("Copy videos already in target codec", self.s.copy_if_same_codec, id="opt_same")
                     yield Checkbox("Skip existing outputs (resume)", self.s.skip_existing, id="opt_skip")
                     yield Checkbox("8-bit 4:2:0 output", self.s.eight_bit, id="opt_8bit")
+                    yield Select([(v, k) for k, v in PRIORITIES.items()], value=self.s.priority,
+                                 allow_blank=False, id="priority")
             with Vertical(id="status"):
                 with Horizontal(id="actions"):
                     yield Button("Scan", id="scan")
@@ -309,6 +311,7 @@ def build_app(settings: Settings):
                 copy_if_same_codec=self.query_one("#opt_same", Checkbox).value,
                 skip_existing=self.query_one("#opt_skip", Checkbox).value,
                 eight_bit=self.query_one("#opt_8bit", Checkbox).value,
+                priority=str(self.query_one("#priority", Select).value),
             )
 
         def _check(self, s: Settings) -> bool:
@@ -450,7 +453,7 @@ def build_app(settings: Settings):
                 self.log_line(("Cancelled. " if cancelled else "Done. ") + _summary_text(summary), level)
                 self.notify(_summary_text(summary), timeout=10)
 
-    return VidConvApp(settings)
+    return TreeConvApp(settings)
 
 
 def run_tui(settings: Settings) -> int:
@@ -473,6 +476,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--reencode-same", action="store_true", help="re-encode even files already in target codec")
     ap.add_argument("--overwrite", action="store_true", help="redo outputs that already exist")
     ap.add_argument("--keep-bit-depth", action="store_true", help="don't force 8-bit yuv420p output")
+    ap.add_argument("--priority", choices=list(PRIORITIES), default="low",
+                    help="ffmpeg CPU/disk priority: normal, low (default) or idle")
     ap.add_argument("--run", action="store_true", help="run headless (no TUI)")
     a = ap.parse_args(argv)
     codec = CODECS[a.codec]
@@ -481,7 +486,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         crf=a.crf if a.crf is not None else codec.default_crf,
         preset=a.preset or codec.default_preset, container=a.container,
         copy_if_same_codec=not a.reencode_same, skip_existing=not a.overwrite,
-        eight_bit=not a.keep_bit_depth)
+        eight_bit=not a.keep_bit_depth, priority=a.priority)
     if a.run:
         return run_headless(settings)
     try:
