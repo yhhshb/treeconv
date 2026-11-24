@@ -14,6 +14,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+__version__ = "0.1.0"
+
+
+def _extend_path() -> None:
+    """Make ffmpeg findable when launched from a desktop (double-click).
+
+    A packaged app looks in its own folder first, so ffmpeg can be dropped next to it.
+    macOS apps started from Finder get a minimal PATH without Homebrew/MacPorts.
+    """
+    first: List[str] = []
+    last: List[str] = []
+    if getattr(sys, "frozen", False):
+        first.append(str(Path(sys.executable).resolve().parent))
+    if sys.platform == "darwin":
+        last += ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
+    current = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    first = [d for d in first if d not in current]
+    last = [d for d in last if d not in current and os.path.isdir(d)]
+    if first or last:
+        os.environ["PATH"] = os.pathsep.join(first + current + last)
+
+
+_extend_path()
+
 # --------------------------------------------------------------------------- #
 # Static tables
 # --------------------------------------------------------------------------- #
@@ -126,12 +150,18 @@ class Settings:
     priority: str = "low"            # "normal", "low" or "idle" (see PRIORITIES)
 
 
+_FFMPEG_HINT = {
+    "win32": "winget install ffmpeg, or put ffmpeg.exe and ffprobe.exe next to treeconv",
+    "darwin": "brew install ffmpeg",
+}.get(sys.platform, "e.g. sudo apt install ffmpeg")
+
+
 def tool_problems(codec_key: str) -> List[str]:
     """Return a list of problems with the ffmpeg installation (empty = OK)."""
     problems = []
     for tool in ("ffmpeg", "ffprobe"):
         if shutil.which(tool) is None:
-            problems.append(f"'{tool}' not found on PATH. Install ffmpeg first.")
+            problems.append(f"'{tool}' not found. Install ffmpeg first ({_FFMPEG_HINT}).")
     if problems:
         return problems
     enc = CODECS[codec_key].encoder
@@ -250,6 +280,11 @@ def scan(inputs: Sequence[Path], output: Path) -> Plan:
                 kind = "video" if src.suffix.lower() in VIDEO_EXTS else "copy"
                 plan.jobs.append(Job(kind, src, dest_root / rel / name, size))
     return plan
+
+
+def summary_text(s: Dict[str, int]) -> str:
+    return (f"{s['converted']} converted, {s['copied_video']} videos already in target codec, "
+            f"{s['copied']} other files copied, {s['skipped']} skipped, {s['failed']} failed")
 
 
 def human_size(n: float) -> str:

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""treeconv - batch video converter with a terminal UI.
+"""treeconv - batch video converter that mirrors whole folder trees.
 
-Mirrors one or more input folders into an output folder, re-encoding every
-video (default: to H.264/x264) while keeping all audio tracks, embedded
-subtitles, chapters, metadata and attachments. Every other file (external
-.srt/.ass subtitles, .nfo, artwork, ...) is copied as-is.
+Re-encodes every video (default: to H.264/x264) while keeping all audio tracks,
+embedded subtitles, chapters, metadata and attachments, and copies every other
+file (external .srt/.ass subtitles, .nfo, artwork, ...) as-is.
 
-Usage:
-    python treeconv.py                                  # interactive TUI
-    python treeconv.py -i /media/Shows -i /media/Films -o /media/out   # TUI, pre-filled
-    python treeconv.py -i /media/Shows -o /media/out --run             # headless
+How it starts:
+    treeconv                          from a terminal: terminal UI
+    (double-click)                    desktop GUI
+    treeconv -i Shows -o out          any option: command-line mode (no UI)
+    treeconv --tui / --gui [options]  open a UI, pre-filled with the options
 """
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from core import (CODECS, CONTAINERS, PRIORITIES, Callbacks, Converter, Job, Plan, Settings,
-                  human_size, scan, tool_problems, validate)
+from core import (CODECS, CONTAINERS, PRIORITIES, __version__, Callbacks, Converter, Job, Plan, Settings,
+                  human_size, scan, summary_text, tool_problems, validate)
 
 
 # --------------------------------------------------------------------------- #
@@ -49,12 +49,7 @@ class _PrintCallbacks(Callbacks):
 
     def finished(self, summary: Dict[str, int], cancelled: bool) -> None:
         sys.stdout.write("\r\033[K")
-        print(("Cancelled. " if cancelled else "Done. ") + _summary_text(summary))
-
-
-def _summary_text(s: Dict[str, int]) -> str:
-    return (f"{s['converted']} converted, {s['copied_video']} videos already in target codec, "
-            f"{s['copied']} other files copied, {s['skipped']} skipped, {s['failed']} failed")
+        print(("Cancelled. " if cancelled else "Done. ") + summary_text(summary))
 
 
 def run_headless(settings: Settings) -> int:
@@ -450,8 +445,8 @@ def build_app(settings: Settings):
             self.query_one("#current", Label).update("Cancelled" if cancelled else "Finished")
             if summary:
                 level = "error" if summary["failed"] else ("warn" if cancelled else "ok")
-                self.log_line(("Cancelled. " if cancelled else "Done. ") + _summary_text(summary), level)
-                self.notify(_summary_text(summary), timeout=10)
+                self.log_line(("Cancelled. " if cancelled else "Done. ") + summary_text(summary), level)
+                self.notify(summary_text(summary), timeout=10)
 
     return TreeConvApp(settings)
 
@@ -465,8 +460,50 @@ def run_tui(settings: Settings) -> int:
 # Entry point
 # --------------------------------------------------------------------------- #
 
-def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def _launched_from_terminal() -> bool:
+    """True when started from a shell, False when double-clicked on a desktop."""
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            pids = (ctypes.c_uint32 * 8)()
+            count = ctypes.windll.kernel32.GetConsoleProcessList(pids, 8)
+        except Exception:
+            return True
+        if count == 0:            # no console at all (windowed build)
+            return False
+        # A double-clicked console program is alone on its new console. A one-file
+        # PyInstaller build is two processes (bootloader + app) sharing it.
+        own = 1
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass and Path(meipass).parent != Path(sys.executable).parent:
+            own = 2
+        return count > own
+    return bool(sys.stdin and sys.stdin.isatty() and sys.stdout and sys.stdout.isatty())
+
+
+def _handoff_to_gui_exe(argv: List[str]) -> bool:
+    """Windows: a double-clicked console exe starts its windowed twin and exits,
+    so no empty console window stays open next to the GUI."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return False
+    exe = Path(sys.executable)
+    twin = exe.with_name(exe.stem + "-gui" + exe.suffix)
+    if not twin.is_file():
+        return False
+    import subprocess
+    subprocess.Popen([str(twin), *argv], close_fds=True,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    return True
+
+
+def _is_gui_build() -> bool:
+    """The windowed twin executable (treeconv-gui) always opens the GUI."""
+    return getattr(sys, "frozen", False) and Path(sys.executable).stem.lower().endswith("-gui")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="treeconv", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-i", "--input", action="append", default=[], type=Path, help="input folder (repeatable)")
     ap.add_argument("-o", "--output", type=Path, default=Path(""), help="output folder")
     ap.add_argument("-c", "--codec", choices=list(CODECS), default="x264", help="target codec (default x264)")
@@ -478,8 +515,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--keep-bit-depth", action="store_true", help="don't force 8-bit yuv420p output")
     ap.add_argument("--priority", choices=list(PRIORITIES), default="low",
                     help="ffmpeg CPU/disk priority: normal, low (default) or idle")
-    ap.add_argument("--run", action="store_true", help="run headless (no TUI)")
-    a = ap.parse_args(argv)
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--tui", action="store_true", help="open the terminal UI (pre-filled with the options)")
+    mode.add_argument("--gui", action="store_true", help="open the desktop GUI (pre-filled with the options)")
+    mode.add_argument("--run", action="store_true", help=argparse.SUPPRESS)  # old name of CLI mode
+    ap.add_argument("-V", "--version", action="version", version=f"treeconv {__version__}")
+    return ap
+
+
+def main(argv: Optional[List[str]] = None, force: Optional[str] = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = [x for x in argv if not x.startswith("-psn_")]  # old macOS Finder launch argument
+    if force is None and _is_gui_build():
+        force = "gui"
+    a = build_parser().parse_args(argv)
     codec = CODECS[a.codec]
     settings = Settings(
         inputs=a.input, output=a.output, codec=a.codec,
@@ -487,13 +537,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         preset=a.preset or codec.default_preset, container=a.container,
         copy_if_same_codec=not a.reencode_same, skip_existing=not a.overwrite,
         eight_bit=not a.keep_bit_depth, priority=a.priority)
-    if a.run:
+
+    if force:
+        mode = force
+    elif a.gui:
+        mode = "gui"
+    elif a.tui:
+        mode = "tui"
+    elif argv:                                   # options given: plain command-line tool
+        mode = "cli"
+    elif _launched_from_terminal():
+        mode = "tui"
+    else:
+        if _handoff_to_gui_exe(argv):
+            return 0
+        mode = "gui"
+
+    if mode == "cli":
+        if not settings.inputs or not str(settings.output):
+            build_parser().error("command-line mode needs at least one -i/--input and -o/--output "
+                                 "(or use --tui / --gui to open a UI)")
         return run_headless(settings)
+    if mode == "gui":
+        try:
+            from gui import run_gui
+        except ImportError as exc:
+            print(f"The GUI needs Tkinter ({exc}). On Debian/Ubuntu: sudo apt install python3-tk",
+                  file=sys.stderr)
+            return 1
+        return run_gui(settings)
     try:
         import textual  # noqa: F401
     except ImportError:
-        print("The TUI needs 'textual':  pip install textual   (or use --run for headless mode)",
-              file=sys.stderr)
+        print("The terminal UI needs 'textual':  pip install textual   "
+              "(or pass -i/-o to use command-line mode)", file=sys.stderr)
         return 1
     return run_tui(settings)
 

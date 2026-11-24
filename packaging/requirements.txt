@@ -1,0 +1,4 @@
+# Build-time dependencies (the packaged program needs none of these installed)
+pyinstaller>=6.10,<7
+pillow>=10        # lets PyInstaller turn assets/icon.png into the macOS .icns
+textual>=0.80

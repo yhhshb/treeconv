@@ -1,22 +1,66 @@
 # treeconv
 
-Batch video converter with a terminal UI (Textual + ffmpeg). Mirrors input folders into an
-output folder, re-encoding videos (default: x265 → x264) and copying everything else as-is.
+Batch video converter with a terminal UI (Textual) and a desktop GUI (Tkinter), powered by ffmpeg.
+Mirrors input folders into an output folder, re-encoding videos (default: x265 → x264) and
+copying everything else as-is.
 
-## Install
+## Download
 
-    sudo apt install ffmpeg          # or brew install ffmpeg
-    pip install -r requirements.txt
+Ready-to-run packages are on the [Releases](https://github.com/yhhshb/treeconv/releases) page.
+treeconv itself needs nothing else, but it uses **ffmpeg**, which you install separately:
+`winget install ffmpeg` (Windows), `brew install ffmpeg` (macOS), `sudo apt install ffmpeg` (Linux).
+On Windows you can also put `ffmpeg.exe` and `ffprobe.exe` in treeconv's folder.
 
-## Run
+| System | File | |
+|---|---|---|
+| Windows | `…-windows-x64-setup.exe` | Installer: Start-menu shortcut, optional `treeconv` on PATH |
+| Windows | `…-windows-x64.zip` | Portable: unzip, double-click `treeconv-gui.exe` |
+| macOS | `…-macos-arm64.dmg` (Apple silicon), `…-macos-x64.dmg` (Intel) | Drag `treeconv.app` to Applications |
+| Linux | `…-linux-x64.AppImage`, `…-linux-arm64.AppImage` | `chmod +x`, then double-click or run it |
+| Linux | `…-linux-x64.tar.gz` | Plain folder, for servers or your own packaging |
 
-    python treeconv.py                                    # TUI
-    python treeconv.py -i ~/Shows -i ~/Films -o ~/out     # TUI, pre-filled
-    python treeconv.py -i ~/Shows -o ~/out --run          # headless (no TUI)
+The builds are not code-signed yet, so the first launch shows a warning: on Windows click
+*More info → Run anyway*; on macOS open *System Settings → Privacy & Security* and click
+*Open Anyway* (or run `xattr -dr com.apple.quarantine /Applications/treeconv.app`).
 
-`python treeconv.py --help` lists all options (codec, CRF, preset, container, …).
+## How it starts
 
-Keys: `Ctrl+S` start, `Ctrl+R` scan, `Ctrl+X` cancel, `Del` remove selected input, `Ctrl+Q` quit.
+The same program has three faces:
+
+- **Double-clicked** (desktop, Start menu, Finder, file manager): the desktop GUI.
+- **Run from a terminal with no options**: the terminal UI.
+- **Run with options**: a plain command-line tool, e.g. for scripts:
+
+      treeconv -i ~/Shows -i ~/Films -o ~/out --codec x265 --priority idle
+
+`--tui` or `--gui` open a UI pre-filled with the given options. `treeconv --help` lists all options.
+
+The TUI and GUI share the same layout, options and keys: `Ctrl+S` start, `Ctrl+R` scan,
+`Ctrl+X` cancel, `Del` remove selected input, `Ctrl+Q` quit (`Cmd` instead of `Ctrl` on macOS in the GUI).
+
+To type `treeconv` in a terminal:
+
+- Windows: tick "Add treeconv to PATH" in the installer (or use `treeconv.exe` from the zip).
+- macOS: `sudo ln -s /Applications/treeconv.app/Contents/MacOS/treeconv /usr/local/bin/treeconv`
+- Linux: move the AppImage to a folder on your PATH, e.g. `~/.local/bin/treeconv`.
+
+## Run from source
+
+    pip install -r requirements.txt  # textual, for the terminal UI
+    python treeconv.py               # same rules as above (python gui.py always opens the GUI)
+
+The GUI uses Tkinter from the standard library (on Debian/Ubuntu: `sudo apt install python3-tk`).
+
+## Building the packages
+
+    pip install -r packaging/requirements.txt
+    python packaging/build.py        # build + package + smoke test, output in dist/release/
+
+PyInstaller cannot cross-compile, so each platform is built on its own system. The
+[release workflow](.github/workflows/release.yml) does this on GitHub for all of them: bump
+`__version__` in `core.py`, then push a matching tag (`git tag v0.1.0 && git push --tags`). It
+builds and tests every package and creates a draft release with them attached; review it and
+press *Publish*. Windows installers need [Inno Setup](https://jrsoftware.org/isinfo.php).
 
 ## What it does
 
@@ -37,6 +81,11 @@ Keys: `Ctrl+S` start, `Ctrl+R` scan, `Ctrl+X` cancel, `Del` remove selected inpu
 - "8-bit 4:2:0 output" (on by default) makes 10-bit x265 sources play on devices that only
   support standard H.264. HDR sources are not tone-mapped (colours will look washed out).
 - Data streams (e.g. MP4 timecode tracks) are dropped.
+- ffmpeg uses all CPU cores on one file at a time, but runs at **low priority** by default
+  (`--priority low`), so other programs get the CPU first and encoding only uses spare capacity.
+  `--priority idle` runs it only when the CPU would otherwise be idle (Linux: `SCHED_IDLE` and idle
+  disk I/O; Windows: idle priority class); `--priority normal` turns this off for the fastest
+  encodes.
 
 ## Why not X?
 
