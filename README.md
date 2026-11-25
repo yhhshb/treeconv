@@ -1,8 +1,9 @@
 # treeconv
 
-Batch video converter with a terminal UI (Textual) and a desktop GUI (Tkinter), powered by ffmpeg.
-Mirrors input folders into an output folder, re-encoding videos (default: x265 → x264) and
-copying everything else as-is.
+Batch video and audio converter with a terminal UI (Textual) and a desktop GUI (Tkinter),
+powered by ffmpeg. Mirrors input folders into an output folder, converting the files that match
+the target format (videos for a video codec, audio files for an audio format) and copying
+everything else as-is.
 
 ## Download
 
@@ -32,6 +33,7 @@ The same program has three faces:
 - **Run with options**: a plain command-line tool, e.g. for scripts:
 
       treeconv -i ~/Shows -i ~/Films -o ~/out --codec x265 --priority idle
+      treeconv -i ~/Music -o ~/Music-mp3 -c mp3                # FLAC library -> MP3 (V0)
 
 `--tui` or `--gui` open a UI pre-filled with the given options. `treeconv --help` lists all options.
 
@@ -65,6 +67,9 @@ press *Publish*. Windows installers need [Inno Setup](https://jrsoftware.org/isi
 ## What it does
 
 - `out/<input name>/…` is created for every input folder, with the same tree (empty folders too).
+- The **target format** decides what is converted. A video codec (x264, x265, AV1) converts video
+  files; an audio format (MP3, AAC, Opus, Vorbis, FLAC, ALAC) converts audio files. Everything else
+  is copied unchanged, so with an audio target, videos and their soundtracks are left alone.
 - Refuses to run if output == an input, output is inside an input, an input would be
   overwritten, or two inputs share a folder name.
 - Video files are re-encoded; **all** audio tracks, embedded subtitles (with language, title,
@@ -81,6 +86,27 @@ press *Publish*. Windows installers need [Inno Setup](https://jrsoftware.org/isi
 - "8-bit 4:2:0 output" (on by default) makes 10-bit x265 sources play on devices that only
   support standard H.264. HDR sources are not tone-mapped (colours will look washed out).
 - Data streams (e.g. MP4 timecode tracks) are dropped.
+
+### Audio targets
+
+| Format | Output | Quality (`--preset`, default first) |
+|---|---|---|
+| `mp3` | `.mp3` | `V0` (LAME VBR ~245 kbps), `V2`, `V4`, `320k`, `256k`, `192k`, `128k` |
+| `aac` | `.m4a` | `256k`, `320k`, `192k`, `128k`, `96k` |
+| `opus` | `.opus` | `160k`, `256k`, `192k`, `128k`, `96k`, `64k` |
+| `vorbis` | `.ogg` | `q6`, `q10` … `q3` |
+| `flac` | `.flac` | `level 5`, `level 0` … `level 12` (all lossless; higher = smaller, slower) |
+| `alac` | `.m4a` | lossless, no options |
+
+- Tags (title, artist, album, track…) are kept, from any source (FLAC/Vorbis comments, ID3, MP4).
+  Embedded cover art is kept in MP3, M4A and FLAC (Ogg/Opus outputs drop it). Folder images
+  such as `cover.jpg` are copied like any other file.
+- Sample rate and channels are adapted only when the format requires it (e.g. 96 kHz → 48 kHz
+  and 5.1 → stereo for MP3; Opus is always 48 kHz).
+- Files already in the target format are copied (turn off "Copy if already in target format" to
+  re-encode them). CRF, container and 8-bit only apply to video, so they are greyed out.
+- If two sources would produce the same file (`song.flac` and `song.wav` → `song.mp3`), the first
+  one wins and the other is reported and skipped.
 - ffmpeg uses all CPU cores on one file at a time, but runs at **low priority** by default
   (`--priority low`), so other programs get the CPU first and encoding only uses spare capacity.
   `--priority idle` runs it only when the CPU would otherwise be idle (Linux: `SCHED_IDLE` and idle

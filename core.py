@@ -1,5 +1,9 @@
 """Core logic for treeconv: validation, scanning, probing and ffmpeg conversion.
 
+The target format decides what gets converted: a video codec converts video files,
+an audio format converts audio files. Everything else is copied unchanged (so with an
+audio target, videos and their soundtracks are left alone).
+
 No UI code lives here, so it can be driven by the TUI or by the headless CLI.
 """
 from __future__ import annotations
@@ -47,6 +51,12 @@ VIDEO_EXTS = {
     ".m2ts", ".mts", ".mpg", ".mpeg", ".vob", ".3gp", ".ogv", ".divx", ".asf",
 }
 
+AUDIO_EXTS = {
+    ".flac", ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wma", ".aif",
+    ".aiff", ".aifc", ".alac", ".ape", ".wv", ".tta", ".mpc", ".mka", ".ac3", ".dts",
+    ".dsf", ".dff", ".caf", ".mp2", ".amr",
+}
+
 X26X_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast",
                 "medium", "slow", "slower", "veryslow")
 
@@ -57,17 +67,51 @@ class Codec:
     label: str
     encoder: str            # ffmpeg encoder name
     codec_name: str         # ffprobe codec_name of streams already in this codec
-    default_crf: int
+    default_crf: int        # video only
     presets: Tuple[str, ...]
     default_preset: str
+    kind: str = "video"     # "video" or "audio"
+    ext: str = ""           # audio: output extension
+    # audio: ffmpeg options for each entry of `presets`
+    preset_args: Dict[str, Tuple[str, ...]] = field(default_factory=dict, hash=False)
+
+    @property
+    def is_audio(self) -> bool:
+        return self.kind == "audio"
+
+
+def _bitrates(*rates: int) -> Dict[str, Tuple[str, ...]]:
+    return {f"{r}k": ("-b:a", f"{r}k") for r in rates}
 
 
 CODECS: Dict[str, Codec] = {
-    "x264": Codec("x264", "H.264 / AVC (libx264)", "libx264", "h264", 20, X26X_PRESETS, "medium"),
-    "x265": Codec("x265", "H.265 / HEVC (libx265)", "libx265", "hevc", 22, X26X_PRESETS, "medium"),
-    "av1": Codec("av1", "AV1 (libsvtav1)", "libsvtav1", "av1", 30,
+    "x264": Codec("x264", "Video: H.264 / AVC (x264)", "libx264", "h264", 20, X26X_PRESETS, "medium"),
+    "x265": Codec("x265", "Video: H.265 / HEVC (x265)", "libx265", "hevc", 22, X26X_PRESETS, "medium"),
+    "av1": Codec("av1", "Video: AV1 (SVT-AV1)", "libsvtav1", "av1", 30,
                  tuple(str(i) for i in range(13, -1, -1)), "6"),
 }
+
+
+def _audio(key: str, label: str, encoder: str, codec_name: str, ext: str,
+           args: Dict[str, Tuple[str, ...]], default: str) -> Codec:
+    return Codec(key, label, encoder, codec_name, 0, tuple(args), default,
+                 kind="audio", ext=ext, preset_args=args)
+
+
+# Audio quality presets: mp3 V0..V4 are LAME VBR levels, the rest are bitrates/levels.
+_MP3 = {**{f"V{q}": ("-q:a", str(q)) for q in (0, 2, 4)}, **_bitrates(320, 256, 192, 128)}
+for _c in (
+    _audio("mp3", "Audio: MP3 (.mp3)", "libmp3lame", "mp3", ".mp3", _MP3, "V0"),
+    _audio("aac", "Audio: AAC (.m4a)", "aac", "aac", ".m4a", _bitrates(320, 256, 192, 128, 96), "256k"),
+    _audio("opus", "Audio: Opus (.opus)", "libopus", "opus", ".opus",
+           _bitrates(256, 192, 160, 128, 96, 64), "160k"),
+    _audio("vorbis", "Audio: Ogg Vorbis (.ogg)", "libvorbis", "vorbis", ".ogg",
+           {f"q{q}": ("-q:a", str(q)) for q in (10, 8, 7, 6, 5, 4, 3)}, "q6"),
+    _audio("flac", "Audio: FLAC, lossless (.flac)", "flac", "flac", ".flac",
+           {f"level {n}": ("-compression_level", str(n)) for n in range(13)}, "level 5"),
+    _audio("alac", "Audio: ALAC, lossless (.m4a)", "alac", "alac", ".m4a", {"default": ()}, "default"),
+):
+    CODECS[_c.key] = _c
 
 CONTAINERS = {
     "same": "Same as source (MKV fallback)",
@@ -140,11 +184,11 @@ def _audio_ok(ext: str, codec: str) -> bool:
 class Settings:
     inputs: List[Path]
     output: Path
-    codec: str = "x264"
-    crf: int = 20
-    preset: str = "medium"
-    container: str = "same"          # "same", ".mkv" or ".mp4"
-    copy_if_same_codec: bool = True  # copy files already in the target codec
+    codec: str = "x264"              # key of CODECS: a video codec or an audio format
+    crf: int = 20                    # video only
+    preset: str = "medium"           # video: encoder preset; audio: quality preset
+    container: str = "same"          # video only: "same", ".mkv" or ".mp4"
+    copy_if_same_codec: bool = True  # copy files already in the target codec/format
     skip_existing: bool = True       # resume: skip outputs that already exist
     eight_bit: bool = True           # force yuv420p (best device compatibility)
     priority: str = "low"            # "normal", "low" or "idle" (see PRIORITIES)
@@ -229,9 +273,9 @@ def validate(inputs: Sequence[Path], output: Optional[Path]) -> List[str]:
 
 @dataclass
 class Job:
-    kind: str          # "video" or "copy"
+    kind: str          # "video", "audio" or "other" (by file extension)
     src: Path
-    dst: Path          # for videos: destination with the *source* extension (final ext decided at run time)
+    dst: Path          # destination with the *source* extension (final ext decided at run time)
     size: int
 
 
@@ -239,26 +283,37 @@ class Job:
 class Plan:
     jobs: List[Job] = field(default_factory=list)
     dirs: List[Path] = field(default_factory=list)
+    target_kind: str = "video"   # which kind of file gets converted
 
     @property
-    def videos(self) -> List[Job]:
-        return [j for j in self.jobs if j.kind == "video"]
+    def to_convert(self) -> List[Job]:
+        return [j for j in self.jobs if j.kind == self.target_kind]
 
     @property
-    def others(self) -> List[Job]:
-        return [j for j in self.jobs if j.kind == "copy"]
+    def to_copy(self) -> List[Job]:
+        return [j for j in self.jobs if j.kind != self.target_kind]
 
     @property
     def total_bytes(self) -> int:
         return sum(j.size for j in self.jobs)
+
+    def describe(self) -> str:
+        conv = self.to_convert
+        return (f"{len(conv)} {self.target_kind} file(s) to convert ({human_size(sum(j.size for j in conv))}), "
+                f"{len(self.to_copy)} other file(s) to copy, {len(self.dirs)} folder(s)")
 
 
 def is_temp_name(name: str) -> bool:
     return ".treeconv-tmp" in name
 
 
-def scan(inputs: Sequence[Path], output: Path) -> Plan:
-    plan = Plan()
+def file_kind(path: Path) -> str:
+    ext = path.suffix.lower()
+    return "video" if ext in VIDEO_EXTS else "audio" if ext in AUDIO_EXTS else "other"
+
+
+def scan(inputs: Sequence[Path], output: Path, codec: str = "x264") -> Plan:
+    plan = Plan(target_kind=CODECS[codec].kind)
     out = Path(output).expanduser().resolve()
     for raw in inputs:
         inp = Path(raw).expanduser().resolve()
@@ -277,13 +332,12 @@ def scan(inputs: Sequence[Path], output: Path) -> Plan:
                     size = src.stat().st_size
                 except OSError:
                     continue
-                kind = "video" if src.suffix.lower() in VIDEO_EXTS else "copy"
-                plan.jobs.append(Job(kind, src, dest_root / rel / name, size))
+                plan.jobs.append(Job(file_kind(src), src, dest_root / rel / name, size))
     return plan
 
 
 def summary_text(s: Dict[str, int]) -> str:
-    return (f"{s['converted']} converted, {s['copied_video']} videos already in target codec, "
+    return (f"{s['converted']} converted, {s['already']} already in target format, "
             f"{s['copied']} other files copied, {s['skipped']} skipped, {s['failed']} failed")
 
 
@@ -445,6 +499,32 @@ def build_ffmpeg_cmd(src: Path, tmp: Path, sp: StreamPlan, s: Settings) -> List[
     return cmd
 
 
+# Containers that can carry cover art (as an attached picture) for audio.
+_COVER_OK = {".mp3", ".m4a", ".flac"}
+
+
+def build_audio_cmd(src: Path, tmp: Path, info: dict, s: Settings) -> List[str]:
+    codec = CODECS[s.codec]
+    streams = info.get("streams", [])
+    audio = next(x for x in streams if x.get("codec_type") == "audio")
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+           "-nostats", "-progress", "pipe:1", "-i", str(src), "-map", f"0:{audio['index']}"]
+    cover = next((x for x in streams if x.get("codec_type") == "video" and _is_cover(x)
+                  and x.get("codec_name") in ("mjpeg", "png")), None)
+    if cover is not None and codec.ext in _COVER_OK:
+        cmd += ["-map", f"0:{cover['index']}", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+    # Tags live in the container (FLAC, MP3, M4A) or on the stream (Ogg, Opus).
+    has_format_tags = bool(info.get("format", {}).get("tags"))
+    cmd += ["-map_metadata", "0" if has_format_tags else f"0:s:{audio['index']}", "-map_chapters", "-1"]
+    cmd += ["-c:a", codec.encoder, *codec.preset_args.get(s.preset, codec.preset_args[codec.default_preset])]
+    if codec.ext == ".mp3":
+        cmd += ["-id3v2_version", "3"]     # ID3v2.3: read by every player, incl. Windows Explorer
+    if codec.ext == ".m4a":
+        cmd += ["-movflags", "+faststart"]
+    cmd += [str(tmp)]
+    return cmd
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
@@ -483,7 +563,8 @@ class Converter:
 
     # -- main loop ------------------------------------------------------------ #
     def run(self) -> Dict[str, int]:
-        summary = {"converted": 0, "copied_video": 0, "copied": 0, "skipped": 0, "failed": 0}
+        summary = {"converted": 0, "already": 0, "copied": 0, "skipped": 0, "failed": 0}
+        self._written: Dict[Path, Path] = {}   # output -> source, to catch name collisions
         for d in self.plan.dirs:
             d.mkdir(parents=True, exist_ok=True)
         total_bytes = max(1, self.plan.total_bytes)
@@ -500,8 +581,12 @@ class Converter:
                 self.cb.overall((_base + frac * _size) / total_bytes)
 
             try:
-                status = self._do_video(job, on_progress) if job.kind == "video" \
-                    else self._do_copy(job)
+                if job.kind != self.plan.target_kind:
+                    status = self._do_copy(job)
+                elif job.kind == "video":
+                    status = self._do_video(job, on_progress)
+                else:
+                    status = self._do_audio(job, on_progress)
                 summary[status] += 1
             except Exception as exc:
                 if self.cancelled:
@@ -514,8 +599,20 @@ class Converter:
         self.cb.finished(summary, self.cancelled)
         return summary
 
+    def _claim(self, dst: Path, src: Path) -> bool:
+        """Reserve an output path; False if another source already wrote it this run
+        (e.g. song.flac and song.wav both becoming song.mp3)."""
+        other = self._written.get(dst)
+        if other is not None and other != src:
+            self.cb.log(f"{src.name}: not written, {dst.name} already comes from {other.name}", "warn")
+            return False
+        self._written[dst] = src
+        return True
+
     # -- plain copy ----------------------------------------------------------- #
-    def _do_copy(self, job: Job) -> str:
+    def _do_copy(self, job: Job, status: str = "copied") -> str:
+        if not self._claim(job.dst, job.src):
+            return "skipped"
         if self.s.skip_existing and job.dst.exists():
             st_s, st_d = job.src.stat(), job.dst.stat()
             if st_s.st_size == st_d.st_size and int(st_d.st_mtime) >= int(st_s.st_mtime):
@@ -523,7 +620,7 @@ class Converter:
         job.dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(job.src, job.dst)
         self.cb.log(f"copied   {job.src.name}", "dim")
-        return "copied"
+        return status
 
     # -- video ---------------------------------------------------------------- #
     def _do_video(self, job: Job, on_progress: Callable[..., None]) -> str:
@@ -536,16 +633,15 @@ class Converter:
 
         remux = self.s.copy_if_same_codec and all(v.get("codec_name") == codec.codec_name for v in vids)
         if remux and self.s.container == "same":
-            if self.s.skip_existing and job.dst.exists():
-                return "skipped"
-            shutil.copy2(job.src, job.dst)
-            self.cb.log(f"already {codec.codec_name}, copied {job.src.name}", "dim")
-            return "copied_video"
+            self.cb.log(f"already {codec.codec_name}: {job.src.name}", "dim")
+            return self._do_copy(job, "already")
 
         sp = plan_streams(info, job.src.suffix, self.s.container, codec.codec_name, remux)
         if not any(k == "video" for _, k, _ in sp.maps):
             raise RuntimeError(f"no container can hold {codec.codec_name} video for this file")
         dst = job.dst if sp.ext == job.src.suffix.lower() else job.dst.with_suffix(sp.ext)
+        if not self._claim(dst, job.src):
+            return "skipped"
         if self.s.skip_existing and dst.exists():
             self.cb.log(f"exists, skipped {dst.name}", "dim")
             return "skipped"
@@ -576,7 +672,47 @@ class Converter:
                     tmp.unlink()
                 except OSError:
                     pass
-        return "copied_video" if remux else "converted"
+        return "already" if remux else "converted"
+
+    # -- audio ---------------------------------------------------------------- #
+    def _do_audio(self, job: Job, on_progress: Callable[..., None]) -> str:
+        codec = CODECS[self.s.codec]
+        info = probe(job.src)
+        if main_video_streams(info):
+            self.cb.log(f"{job.src.name} contains video; copying as-is", "warn")
+            return self._do_copy(job)
+        audio = [x for x in info.get("streams", []) if x.get("codec_type") == "audio"]
+        if not audio:
+            self.cb.log(f"no audio stream in {job.src.name}; copying as-is", "warn")
+            return self._do_copy(job)
+        if self.s.copy_if_same_codec and audio[0].get("codec_name") == codec.codec_name:
+            self.cb.log(f"already {codec.codec_name}: {job.src.name}", "dim")
+            return self._do_copy(job, "already")
+        if len(audio) > 1:
+            self.cb.log(f"{job.src.name}: {len(audio)} audio streams, converting the first", "warn")
+
+        dst = job.dst.with_suffix(codec.ext)
+        if not self._claim(dst, job.src):
+            return "skipped"
+        if self.s.skip_existing and dst.exists():
+            self.cb.log(f"exists, skipped {dst.name}", "dim")
+            return "skipped"
+        self.cb.log(f"encoding {job.src.name} -> {dst.suffix}")
+        duration = float(info.get("format", {}).get("duration") or audio[0].get("duration") or 0)
+        tmp = dst.with_name(f".{dst.stem}.treeconv-tmp{dst.suffix}")
+        try:
+            self._run_ffmpeg(build_audio_cmd(job.src, tmp, info, self.s), duration, on_progress)
+            if self.cancelled:
+                raise RuntimeError("cancelled")
+            os.replace(tmp, dst)
+            shutil.copystat(job.src, dst)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        return "converted"
 
     def _run_ffmpeg(self, cmd: List[str], duration: float, on_progress: Callable[..., None]) -> None:
         cmd, extra = priority_wrap(cmd, self.s.priority)

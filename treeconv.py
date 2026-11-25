@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""treeconv - batch video converter that mirrors whole folder trees.
+"""treeconv - batch video/audio converter that mirrors whole folder trees.
 
-Re-encodes every video (default: to H.264/x264) while keeping all audio tracks,
-embedded subtitles, chapters, metadata and attachments, and copies every other
-file (external .srt/.ass subtitles, .nfo, artwork, ...) as-is.
+With a video target (default: H.264/x264) every video is re-encoded, keeping all
+audio tracks, embedded subtitles, chapters, metadata and attachments. With an
+audio target (e.g. -c mp3) every audio file is converted, keeping tags and cover
+art. All other files (including videos, for an audio target) are copied as-is.
 
 How it starts:
     treeconv                          from a terminal: terminal UI
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from core import (CODECS, CONTAINERS, PRIORITIES, __version__, Callbacks, Converter, Job, Plan, Settings,
-                  human_size, scan, summary_text, tool_problems, validate)
+                  scan, summary_text, tool_problems, validate)
 
 
 # --------------------------------------------------------------------------- #
@@ -58,8 +59,8 @@ def run_headless(settings: Settings) -> int:
         for e in errors:
             print("error:", e, file=sys.stderr)
         return 2
-    plan = scan(settings.inputs, settings.output)
-    print(f"{len(plan.videos)} videos, {len(plan.others)} other files, {human_size(plan.total_bytes)}")
+    plan = scan(settings.inputs, settings.output, settings.codec)
+    print(plan.describe())
     conv = Converter(settings, plan, _PrintCallbacks())
     try:
         summary = conv.run()
@@ -168,7 +169,7 @@ def build_app(settings: Settings):
 
     class TreeConvApp(App):
         TITLE = "treeconv"
-        SUB_TITLE = "batch video converter - keeps every subtitle"
+        SUB_TITLE = "batch video & audio converter - keeps your folder tree"
         CSS = """
         #config { height: auto; max-height: 55%; padding: 0 1; }
         .row { height: auto; }
@@ -176,8 +177,8 @@ def build_app(settings: Settings):
         .lbl { width: 16; padding-top: 1; color: $text-muted; }
         #in_path, #out_path { width: 1fr; }
         #in_list { height: 5; border: round $panel; }
-        #codec { width: 30; } #container { width: 36; } #preset { width: 16; }
-        #crf { width: 8; } #priority { width: 22; }
+        #codec { width: 36; } #container { width: 40; } #preset { width: 16; }
+        #crf { width: 8; } #priority { width: 18; }
         #actions { height: auto; margin-bottom: 1; }
         #actions Button { margin-right: 2; }
         #status { height: 1fr; padding: 0 1; border-top: solid $panel; }
@@ -240,8 +241,8 @@ def build_app(settings: Settings):
                                  allow_blank=False, id="container")
                 with Horizontal(classes="row"):
                     yield Label("Options", classes="lbl")
-                    yield Checkbox("Copy videos already in target codec", self.s.copy_if_same_codec, id="opt_same")
-                    yield Checkbox("Skip existing outputs (resume)", self.s.skip_existing, id="opt_skip")
+                    yield Checkbox("Copy if already in target format", self.s.copy_if_same_codec, id="opt_same")
+                    yield Checkbox("Skip existing (resume)", self.s.skip_existing, id="opt_skip")
                     yield Checkbox("8-bit 4:2:0 output", self.s.eight_bit, id="opt_8bit")
                     yield Select([(v, k) for k, v in PRIORITIES.items()], value=self.s.priority,
                                  allow_blank=False, id="priority")
@@ -259,6 +260,7 @@ def build_app(settings: Settings):
 
         def on_mount(self) -> None:
             self.query_one("#crf_lbl", Label).styles.width = 5
+            self._apply_kind(CODECS[self.s.codec])
             self.log_line("Add input folders, choose an output folder, then press [b]Start[/b] (Ctrl+S).")
 
         # ---- helpers ------------------------------------------------------- #
@@ -321,6 +323,14 @@ def build_app(settings: Settings):
             for w in self.query("#config Input, #config Select, #config Checkbox, "
                                 "#config Button, #config ListView, #actions Button"):
                 w.disabled = (not running) if w.id == "cancel" else running
+            if not running:
+                self._apply_kind(CODECS[str(self.query_one("#codec", Select).value)])
+
+        def _apply_kind(self, codec) -> None:
+            """Video-only settings are greyed out for audio targets."""
+            for wid in ("#crf", "#container", "#opt_8bit"):
+                self.query_one(wid).disabled = codec.is_audio
+            self.query_one("#crf_lbl", Label).update("" if codec.is_audio else "CRF")
 
         # ---- events -------------------------------------------------------- #
         @on(Input.Submitted, "#in_path")
@@ -366,17 +376,17 @@ def build_app(settings: Settings):
             preset = self.query_one("#preset", Select)
             preset.set_options([(p, p) for p in codec.presets])
             preset.value = codec.default_preset
-            self.query_one("#crf", Input).value = str(codec.default_crf)
+            if not codec.is_audio:
+                self.query_one("#crf", Input).value = str(codec.default_crf)
+            self._apply_kind(codec)
 
         @on(Button.Pressed, "#scan")
         def action_scan(self) -> None:
             s = self._collect()
             if not s or not self._check(s):
                 return
-            plan = scan(s.inputs, s.output)
-            self.log_line(f"Scan: {len(plan.videos)} video file(s) "
-                          f"({human_size(sum(j.size for j in plan.videos))}), "
-                          f"{len(plan.others)} other file(s), {len(plan.dirs)} folder(s).", "ok")
+            plan = scan(s.inputs, s.output, s.codec)
+            self.log_line(f"Scan: {plan.describe()}.", "ok")
             for inp in s.inputs:
                 self.log_line(f"  {inp}  ->  {Path(s.output).expanduser().resolve() / inp.name}", "dim")
 
@@ -388,12 +398,11 @@ def build_app(settings: Settings):
             if not s or not self._check(s):
                 return
             s.output = s.output.expanduser().resolve()
-            plan = scan(s.inputs, s.output)
+            plan = scan(s.inputs, s.output, s.codec)
             if not plan.jobs and not plan.dirs:
                 self.notify("Nothing to do", severity="warning")
                 return
-            self.log_line(f"Starting: {len(plan.videos)} video(s), {len(plan.others)} other file(s) "
-                          f"-> {s.output}", "ok")
+            self.log_line(f"Starting: {plan.describe()} -> {s.output}", "ok")
             self.converter = Converter(s, plan, TuiCallbacks(self))
             self.started_at = time.monotonic()
             self._set_running(True)
@@ -506,10 +515,15 @@ def build_parser() -> argparse.ArgumentParser:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-i", "--input", action="append", default=[], type=Path, help="input folder (repeatable)")
     ap.add_argument("-o", "--output", type=Path, default=Path(""), help="output folder")
-    ap.add_argument("-c", "--codec", choices=list(CODECS), default="x264", help="target codec (default x264)")
-    ap.add_argument("--crf", type=int, help="quality (lower = better). Default depends on codec")
-    ap.add_argument("--preset", help="encoder preset (default: medium / 6 for AV1)")
-    ap.add_argument("--container", choices=list(CONTAINERS), default="same")
+    ap.add_argument("-c", "--codec", choices=list(CODECS), default="x264", metavar="FORMAT",
+                    help="target format. Video: " + ", ".join(k for k, c in CODECS.items() if not c.is_audio)
+                    + " (default x264). Audio: " + ", ".join(k for k, c in CODECS.items() if c.is_audio)
+                    + ". Only files of that kind are converted, everything else is copied")
+    ap.add_argument("--crf", type=int, help="video quality (lower = better). Default depends on codec")
+    ap.add_argument("--preset", help="video: encoder preset (default medium / 6 for AV1). "
+                    "Audio: quality, e.g. mp3 V0 (default) or 320k; aac/opus bitrate like 256k; "
+                    "vorbis q6; flac 'level 5'")
+    ap.add_argument("--container", choices=list(CONTAINERS), default="same", help="video only")
     ap.add_argument("--reencode-same", action="store_true", help="re-encode even files already in target codec")
     ap.add_argument("--overwrite", action="store_true", help="redo outputs that already exist")
     ap.add_argument("--keep-bit-depth", action="store_true", help="don't force 8-bit yuv420p output")
@@ -529,8 +543,11 @@ def main(argv: Optional[List[str]] = None, force: Optional[str] = None) -> int:
     argv = [x for x in argv if not x.startswith("-psn_")]  # old macOS Finder launch argument
     if force is None and _is_gui_build():
         force = "gui"
-    a = build_parser().parse_args(argv)
+    parser = build_parser()
+    a = parser.parse_args(argv)
     codec = CODECS[a.codec]
+    if a.preset and a.preset not in codec.presets:
+        parser.error(f"--preset for {a.codec} must be one of: " + ", ".join(codec.presets))
     settings = Settings(
         inputs=a.input, output=a.output, codec=a.codec,
         crf=a.crf if a.crf is not None else codec.default_crf,

@@ -19,7 +19,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from core import (CODECS, CONTAINERS, PRIORITIES, Callbacks, Converter, Job, Settings,
-                  human_size, scan, summary_text, tool_problems, validate)
+                  scan, summary_text, tool_problems, validate)
 
 PAD = 4
 LABEL_W = 14
@@ -151,12 +151,13 @@ class TreeConvGui:
         # Target: [codec] CRF [n] [preset] [container]
         f = self._row(cfg, 3, "Target")
         self._codec_keys = list(CODECS)
-        self.codec = ttk.Combobox(f, state="readonly", width=26,
+        self.codec = ttk.Combobox(f, state="readonly", width=30,
                                   values=[c.label for c in CODECS.values()])
         self.codec.current(self._codec_keys.index(self.s.codec))
         self.codec.bind("<<ComboboxSelected>>", self._codec_changed)
         self.codec.grid(row=0, column=0)
-        ttk.Label(f, text="CRF", style="Muted.TLabel").grid(row=0, column=1, padx=(PAD * 3, PAD))
+        self.crf_lbl = ttk.Label(f, text="CRF", style="Muted.TLabel", width=4)
+        self.crf_lbl.grid(row=0, column=1, padx=(PAD * 3, PAD))
         self.crf = tk.StringVar(value=str(self.s.crf))
         self.crf_spin = ttk.Spinbox(f, from_=0, to=63, width=5, textvariable=self.crf)
         self.crf_spin.grid(row=0, column=2)
@@ -164,7 +165,7 @@ class TreeConvGui:
         self.preset.set(self.s.preset if self.s.preset in codec.presets else codec.default_preset)
         self.preset.grid(row=0, column=3, padx=(PAD * 2, 0))
         self._container_keys = list(CONTAINERS)
-        self.container = ttk.Combobox(f, state="readonly", width=30, values=list(CONTAINERS.values()))
+        self.container = ttk.Combobox(f, state="readonly", width=28, values=list(CONTAINERS.values()))
         self.container.current(self._container_keys.index(self.s.container))
         self.container.grid(row=0, column=4, padx=(PAD * 2, 0))
 
@@ -174,8 +175,8 @@ class TreeConvGui:
         self.opt_skip = tk.BooleanVar(value=self.s.skip_existing)
         self.opt_8bit = tk.BooleanVar(value=self.s.eight_bit)
         self._checks = []
-        for i, (txt, var) in enumerate([("Copy videos already in target codec", self.opt_same),
-                                        ("Skip existing outputs (resume)", self.opt_skip),
+        for i, (txt, var) in enumerate([("Copy if already in target format", self.opt_same),
+                                        ("Skip existing (resume)", self.opt_skip),
                                         ("8-bit 4:2:0 output", self.opt_8bit)]):
             cb = ttk.Checkbutton(f, text=txt, variable=var)
             cb.grid(row=0, column=i, padx=(0, PAD * 3))
@@ -235,6 +236,7 @@ class TreeConvGui:
                   text=f"{mod}+S Start   {mod}+R Scan   {mod}+X Cancel run   "
                        f"Del Remove input   {mod}+Q Quit").grid(row=3, column=0, sticky="w")
 
+        self._apply_kind(CODECS[self.s.codec])
         self._config_widgets = [self.in_entry, self.in_browse, self.in_add, self.in_remove,
                                 self.out_entry, self.out_browse, self.codec, self.crf_spin,
                                 self.preset, self.container, self.priority, *self._checks]
@@ -316,7 +318,17 @@ class TreeConvGui:
         codec = CODECS[self._codec_keys[self.codec.current()]]
         self.preset.configure(values=list(codec.presets))
         self.preset.set(codec.default_preset)
-        self.crf.set(str(codec.default_crf))
+        if not codec.is_audio:
+            self.crf.set(str(codec.default_crf))
+        self._apply_kind(codec)
+
+    def _apply_kind(self, codec) -> None:
+        """Video-only settings are greyed out for audio targets."""
+        off = codec.is_audio
+        self.crf_spin.configure(state="disabled" if off else "normal")
+        self.container.configure(state="disabled" if off else "readonly")
+        self._checks[2].configure(state="disabled" if off else "normal")   # 8-bit
+        self.crf_lbl.configure(text="" if off else "CRF")
 
     def _collect(self) -> Optional[Settings]:
         out_raw = self.out_path.get().strip()
@@ -356,6 +368,8 @@ class TreeConvGui:
         self.btn_scan.configure(state="disabled" if running else "normal")
         self.btn_start.configure(state="disabled" if running else "normal")
         self.btn_cancel.configure(state="normal" if running else "disabled")
+        if not running:
+            self._apply_kind(CODECS[self._codec_keys[self.codec.current()]])
 
     # ---- actions ---------------------------------------------------------- #
     def scan(self) -> None:
@@ -364,10 +378,8 @@ class TreeConvGui:
         s = self._collect()
         if not s or not self._check(s):
             return
-        plan = scan(s.inputs, s.output)
-        self.log_line(f"Scan: {len(plan.videos)} video file(s) "
-                      f"({human_size(sum(j.size for j in plan.videos))}), "
-                      f"{len(plan.others)} other file(s), {len(plan.dirs)} folder(s).", "ok")
+        plan = scan(s.inputs, s.output, s.codec)
+        self.log_line(f"Scan: {plan.describe()}.", "ok")
         for inp in s.inputs:
             self.log_line(f"  {inp}  ->  {Path(s.output).expanduser().resolve() / inp.name}", "dim")
 
@@ -378,12 +390,11 @@ class TreeConvGui:
         if not s or not self._check(s):
             return
         s.output = s.output.expanduser().resolve()
-        plan = scan(s.inputs, s.output)
+        plan = scan(s.inputs, s.output, s.codec)
         if not plan.jobs and not plan.dirs:
             messagebox.showinfo("treeconv", "Nothing to do.", parent=self.root)
             return
-        self.log_line(f"Starting: {len(plan.videos)} video(s), {len(plan.others)} other file(s) "
-                      f"-> {s.output}", "ok")
+        self.log_line(f"Starting: {plan.describe()} -> {s.output}", "ok")
         self.converter = Converter(s, plan, _QueueCallbacks(self.q))
         self.started_at = time.monotonic()
         self.file_bar["value"] = 0
