@@ -1,9 +1,24 @@
 # treeconv
 
-Batch video and audio converter with a terminal UI (Textual) and a desktop GUI (Tkinter),
-powered by ffmpeg. Mirrors input folders into an output folder, converting the files that match
-the target format (videos for a video codec, audio files for an audio format) and copying
-everything else as-is.
+**Convert a whole folder tree in one go and get the same tree back.** Point treeconv at a folder
+(or several) and it rebuilds every subfolder in the output, converting the files that match the
+target format and copying everything else unchanged. No selecting files subfolder by subfolder,
+and no flattened output where every file lands in one folder.
+
+```
+Shows/                                  out/Shows/
+├── Show A/                             ├── Show A/
+│   ├── Season 1/                       │   ├── Season 1/
+│   │   ├── E01.mkv     (x265)    →     │   │   ├── E01.mkv     (x264, all audio + subtitles kept)
+│   │   ├── E01.en.srt                  │   │   ├── E01.en.srt  (copied)
+│   │   └── E02.mkv                     │   │   └── E02.mkv
+│   └── poster.jpg                      │   └── poster.jpg      (copied)
+└── Show B/ …                           └── Show B/ …
+```
+
+It works for video (H.264, H.265, AV1, with an optional resolution limit) and audio (MP3, AAC,
+Opus, Vorbis, FLAC, ALAC), and comes with a desktop GUI, a terminal UI and a command-line mode,
+all powered by ffmpeg.
 
 ## Download
 
@@ -33,6 +48,7 @@ The same program has three faces:
 - **Run with options**: a plain command-line tool, e.g. for scripts:
 
       treeconv -i ~/Shows -i ~/Films -o ~/out --codec x265 --priority idle
+      treeconv -i ~/Films -o ~/Films-1080p --resolution 1080p  # 4K -> 1080p, the rest untouched
       treeconv -i ~/Music -o ~/Music-mp3 -c mp3                # FLAC library -> MP3 (V0)
 
 `--tui` or `--gui` open a UI pre-filled with the given options. `treeconv --help` lists all options.
@@ -83,6 +99,12 @@ press *Publish*. Windows installers need [Inno Setup](https://jrsoftware.org/isi
 - Videos already in the target codec are copied (or only remuxed if you forced a container).
 - Encodes go to a hidden temp file and are renamed when complete, so an interrupted run never
   leaves half files; re-running with "Skip existing" resumes where it stopped.
+- **Resolution** (`--resolution`, "Picture" row): cap videos at 2160p, 1440p, 1080p, 720p or 480p.
+  The limit applies to the short side, so a vertical phone video (2160×3840) becomes 1080×1920 at
+  1080p. Larger videos are downscaled with the aspect ratio kept; smaller ones are never upscaled.
+  A video already in the target codec but too large is re-encoded instead of copied.
+  This is separate from the encoder **preset** (ultrafast … veryslow), which only trades encoding
+  time for file size at the same quality and resolution, and from **CRF**, which sets the quality.
 - "8-bit 4:2:0 output" (on by default) makes 10-bit x265 sources play on devices that only
   support standard H.264. HDR sources are not tone-mapped (colours will look washed out).
 - Data streams (e.g. MP4 timecode tracks) are dropped.
@@ -141,3 +163,12 @@ they're closed-source and mostly Windows-only.
 
 treeconv's niche: free, open source, runs anywhere Python and ffmpeg do, and its defaults
 already give you a complete mirrored copy of your library with nothing lost.
+
+## About this project and AI use
+
+treeconv's code was written by an AI assistant (Claude), following my requirements. 
+I needed the tool quickly, and nothing in it is novel: the heavy lifting is
+done by ffmpeg, and the rest (walking a folder tree, mapping streams, packaging) is well-known,
+widely documented work. Using AI let me get a working, tested tool in a short time instead of
+writing that routine code by hand. The behaviour has been tested on sample files, but please
+report anything that looks wrong in the [issues](https://github.com/yhhshb/treeconv/issues).

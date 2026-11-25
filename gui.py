@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from core import (CODECS, CONTAINERS, PRIORITIES, Callbacks, Converter, Job, Settings,
+from core import (CODECS, CONTAINERS, PRIORITIES, RESOLUTIONS, Callbacks, Converter, Job, Settings,
                   scan, summary_text, tool_problems, validate)
 
 PAD = 4
@@ -61,8 +61,8 @@ class TreeConvGui:
 
         root.title("treeconv")
         self._set_icon()
-        root.minsize(760, 520)
-        root.geometry("980x700")
+        root.minsize(900, 560)
+        root.geometry("1060x720")
         self._style()
         self._build()
         self._bind_keys()
@@ -169,22 +169,30 @@ class TreeConvGui:
         self.container.current(self._container_keys.index(self.s.container))
         self.container.grid(row=0, column=4, padx=(PAD * 2, 0))
 
-        # Options: [x] [x] [x] [priority]
-        f = self._row(cfg, 4, "Options")
+        # Picture (video only): [max resolution] [x] 8-bit
+        f = self._row(cfg, 4, "Picture")
+        self._res_keys = list(RESOLUTIONS)
+        self.resolution = ttk.Combobox(f, state="readonly", width=20, values=list(RESOLUTIONS.values()))
+        self.resolution.current(self._res_keys.index(self.s.resolution))
+        self.resolution.grid(row=0, column=0, padx=(0, PAD * 3))
+        self.opt_8bit = tk.BooleanVar(value=self.s.eight_bit)
+        self.chk_8bit = ttk.Checkbutton(f, text="8-bit 4:2:0 output", variable=self.opt_8bit)
+        self.chk_8bit.grid(row=0, column=1)
+
+        # Options: [x] [x] [priority]
+        f = self._row(cfg, 5, "Options")
         self.opt_same = tk.BooleanVar(value=self.s.copy_if_same_codec)
         self.opt_skip = tk.BooleanVar(value=self.s.skip_existing)
-        self.opt_8bit = tk.BooleanVar(value=self.s.eight_bit)
-        self._checks = []
+        self._checks = [self.chk_8bit]
         for i, (txt, var) in enumerate([("Copy if already in target format", self.opt_same),
-                                        ("Skip existing (resume)", self.opt_skip),
-                                        ("8-bit 4:2:0 output", self.opt_8bit)]):
+                                        ("Skip existing (resume)", self.opt_skip)]):
             cb = ttk.Checkbutton(f, text=txt, variable=var)
             cb.grid(row=0, column=i, padx=(0, PAD * 3))
             self._checks.append(cb)
         self._prio_keys = list(PRIORITIES)
         self.priority = ttk.Combobox(f, state="readonly", width=16, values=list(PRIORITIES.values()))
         self.priority.current(self._prio_keys.index(self.s.priority))
-        self.priority.grid(row=0, column=3)
+        self.priority.grid(row=0, column=2)
 
         ttk.Separator(self.root).grid(row=1, column=0, sticky="ew", pady=(PAD * 2, 0))
 
@@ -239,7 +247,7 @@ class TreeConvGui:
         self._apply_kind(CODECS[self.s.codec])
         self._config_widgets = [self.in_entry, self.in_browse, self.in_add, self.in_remove,
                                 self.out_entry, self.out_browse, self.codec, self.crf_spin,
-                                self.preset, self.container, self.priority, *self._checks]
+                                self.preset, self.container, self.resolution, self.priority, *self._checks]
 
     def _log_menu(self) -> None:
         m = tk.Menu(self.log, tearoff=0)
@@ -327,7 +335,8 @@ class TreeConvGui:
         off = codec.is_audio
         self.crf_spin.configure(state="disabled" if off else "normal")
         self.container.configure(state="disabled" if off else "readonly")
-        self._checks[2].configure(state="disabled" if off else "normal")   # 8-bit
+        self.chk_8bit.configure(state="disabled" if off else "normal")
+        self.resolution.configure(state="disabled" if off else "readonly")
         self.crf_lbl.configure(text="" if off else "CRF")
 
     def _collect(self) -> Optional[Settings]:
@@ -347,6 +356,7 @@ class TreeConvGui:
             copy_if_same_codec=self.opt_same.get(),
             skip_existing=self.opt_skip.get(),
             eight_bit=self.opt_8bit.get(),
+            resolution=self._res_keys[self.resolution.current()],
             priority=self._prio_keys[self.priority.current()],
         )
 

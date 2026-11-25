@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from core import (CODECS, CONTAINERS, PRIORITIES, __version__, Callbacks, Converter, Job, Plan, Settings,
+from core import (CODECS, CONTAINERS, PRIORITIES, RESOLUTIONS, __version__, Callbacks, Converter, Job, Plan, Settings,
                   scan, summary_text, tool_problems, validate)
 
 
@@ -178,7 +178,7 @@ def build_app(settings: Settings):
         #in_path, #out_path { width: 1fr; }
         #in_list { height: 5; border: round $panel; }
         #codec { width: 36; } #container { width: 40; } #preset { width: 16; }
-        #crf { width: 8; } #priority { width: 18; }
+        #crf { width: 8; } #resolution { width: 26; } #priority { width: 22; }
         #actions { height: auto; margin-bottom: 1; }
         #actions Button { margin-right: 2; }
         #status { height: 1fr; padding: 0 1; border-top: solid $panel; }
@@ -203,6 +203,7 @@ def build_app(settings: Settings):
         def __init__(self, settings: Settings) -> None:
             super().__init__()
             self.s = settings
+            self._codec_key = settings.codec
             self.inputs: List[Path] = [Path(p).expanduser().resolve() for p in settings.inputs]
             self.converter: Optional[Converter] = None
             self.plan: Optional[Plan] = None
@@ -240,10 +241,14 @@ def build_app(settings: Settings):
                     yield Select([(v, k) for k, v in CONTAINERS.items()], value=self.s.container,
                                  allow_blank=False, id="container")
                 with Horizontal(classes="row"):
+                    yield Label("Picture", classes="lbl")
+                    yield Select([(v, k) for k, v in RESOLUTIONS.items()], value=self.s.resolution,
+                                 allow_blank=False, id="resolution")
+                    yield Checkbox("8-bit 4:2:0 output", self.s.eight_bit, id="opt_8bit")
+                with Horizontal(classes="row"):
                     yield Label("Options", classes="lbl")
                     yield Checkbox("Copy if already in target format", self.s.copy_if_same_codec, id="opt_same")
                     yield Checkbox("Skip existing (resume)", self.s.skip_existing, id="opt_skip")
-                    yield Checkbox("8-bit 4:2:0 output", self.s.eight_bit, id="opt_8bit")
                     yield Select([(v, k) for k, v in PRIORITIES.items()], value=self.s.priority,
                                  allow_blank=False, id="priority")
             with Vertical(id="status"):
@@ -308,6 +313,7 @@ def build_app(settings: Settings):
                 copy_if_same_codec=self.query_one("#opt_same", Checkbox).value,
                 skip_existing=self.query_one("#opt_skip", Checkbox).value,
                 eight_bit=self.query_one("#opt_8bit", Checkbox).value,
+                resolution=str(self.query_one("#resolution", Select).value),
                 priority=str(self.query_one("#priority", Select).value),
             )
 
@@ -328,7 +334,7 @@ def build_app(settings: Settings):
 
         def _apply_kind(self, codec) -> None:
             """Video-only settings are greyed out for audio targets."""
-            for wid in ("#crf", "#container", "#opt_8bit"):
+            for wid in ("#crf", "#container", "#resolution", "#opt_8bit"):
                 self.query_one(wid).disabled = codec.is_audio
             self.query_one("#crf_lbl", Label).update("" if codec.is_audio else "CRF")
 
@@ -372,7 +378,10 @@ def build_app(settings: Settings):
 
         @on(Select.Changed, "#codec")
         def _codec_changed(self, event: Select.Changed) -> None:
-            codec = CODECS[str(event.value)]
+            if str(event.value) == self._codec_key:   # also fired once on mount: keep pre-filled preset
+                return
+            self._codec_key = str(event.value)
+            codec = CODECS[self._codec_key]
             preset = self.query_one("#preset", Select)
             preset.set_options([(p, p) for p in codec.presets])
             preset.value = codec.default_preset
@@ -526,6 +535,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--container", choices=list(CONTAINERS), default="same", help="video only")
     ap.add_argument("--reencode-same", action="store_true", help="re-encode even files already in target codec")
     ap.add_argument("--overwrite", action="store_true", help="redo outputs that already exist")
+    ap.add_argument("--resolution", choices=list(RESOLUTIONS), default="original",
+                    help="video only: maximum resolution (short side), e.g. 1080p. "
+                         "Larger videos are downscaled, smaller ones are left as they are")
     ap.add_argument("--keep-bit-depth", action="store_true", help="don't force 8-bit yuv420p output")
     ap.add_argument("--priority", choices=list(PRIORITIES), default="low",
                     help="ffmpeg CPU/disk priority: normal, low (default) or idle")
@@ -553,7 +565,7 @@ def main(argv: Optional[List[str]] = None, force: Optional[str] = None) -> int:
         crf=a.crf if a.crf is not None else codec.default_crf,
         preset=a.preset or codec.default_preset, container=a.container,
         copy_if_same_codec=not a.reencode_same, skip_existing=not a.overwrite,
-        eight_bit=not a.keep_bit_depth, priority=a.priority)
+        eight_bit=not a.keep_bit_depth, priority=a.priority, resolution=a.resolution)
 
     if force:
         mode = force

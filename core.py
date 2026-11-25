@@ -113,6 +113,29 @@ for _c in (
 ):
     CODECS[_c.key] = _c
 
+# Maximum output resolution, measured on the short side so portrait videos work too.
+# Videos are only ever downscaled, never upscaled; the aspect ratio is kept.
+RESOLUTIONS = {
+    "original": "Original resolution",
+    "2160p": "2160p (4K UHD)",
+    "1440p": "1440p (QHD)",
+    "1080p": "1080p (Full HD)",
+    "720p": "720p (HD)",
+    "480p": "480p (SD)",
+}
+
+
+def max_lines(resolution: str) -> int:
+    """'1080p' -> 1080, 'original' -> 0 (no limit)."""
+    return 0 if resolution == "original" else int(resolution.rstrip("p"))
+
+
+def needs_downscale(stream: dict, resolution: str) -> bool:
+    limit = max_lines(resolution)
+    w, h = int(stream.get("width") or 0), int(stream.get("height") or 0)
+    return bool(limit and w and h and min(w, h) > limit)
+
+
 CONTAINERS = {
     "same": "Same as source (MKV fallback)",
     ".mkv": "Matroska (.mkv)",
@@ -191,6 +214,7 @@ class Settings:
     copy_if_same_codec: bool = True  # copy files already in the target codec/format
     skip_existing: bool = True       # resume: skip outputs that already exist
     eight_bit: bool = True           # force yuv420p (best device compatibility)
+    resolution: str = "original"     # video only: key of RESOLUTIONS
     priority: str = "low"            # "normal", "low" or "idle" (see PRIORITIES)
 
 
@@ -485,6 +509,10 @@ def build_ffmpeg_cmd(src: Path, tmp: Path, sp: StreamPlan, s: Settings) -> List[
     for o, (_, kind, action) in enumerate(sp.maps):
         if kind == "video" and action == "encode":
             cmd += [f"-c:{o}", codec.encoder, f"-crf:{o}", str(s.crf), f"-preset:{o}", s.preset]
+            limit = max_lines(s.resolution)
+            if limit:   # shrink the short side to `limit` if larger; -2 keeps aspect, even size
+                cmd += [f"-filter:{o}", f"scale=w='if(gte(iw,ih),-2,min(iw,{limit}))'"
+                                        f":h='if(gte(iw,ih),min(ih,{limit}),-2)':flags=lanczos"]
             if s.eight_bit:
                 cmd += [f"-pix_fmt:{o}", "yuv420p"]
             if s.codec == "x265":
@@ -631,7 +659,9 @@ class Converter:
             self.cb.log(f"no video stream in {job.src.name}; copying as-is", "warn")
             return self._do_copy(job)
 
-        remux = self.s.copy_if_same_codec and all(v.get("codec_name") == codec.codec_name for v in vids)
+        scale = [v for v in vids if needs_downscale(v, self.s.resolution)]
+        remux = self.s.copy_if_same_codec and not scale and \
+            all(v.get("codec_name") == codec.codec_name for v in vids)
         if remux and self.s.container == "same":
             self.cb.log(f"already {codec.codec_name}: {job.src.name}", "dim")
             return self._do_copy(job, "already")
@@ -654,7 +684,8 @@ class Converter:
         n_subs = sum(1 for _, k, _ in sp.maps if k == "subtitle")
         n_aud = sum(1 for _, k, _ in sp.maps if k == "audio")
         verb = "remuxing" if remux else "encoding"
-        self.cb.log(f"{verb} {job.src.name}  [{n_aud} audio, {n_subs} subtitle stream(s)]")
+        size = f", {scale[0]['width']}x{scale[0]['height']} -> {self.s.resolution}" if scale else ""
+        self.cb.log(f"{verb} {job.src.name}  [{n_aud} audio, {n_subs} subtitle stream(s){size}]")
 
         duration = float(info.get("format", {}).get("duration") or 0) or \
             max((float(v.get("duration") or 0) for v in vids), default=0.0)
